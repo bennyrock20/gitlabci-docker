@@ -1,0 +1,65 @@
+variables:
+  CI_REGISTRY_IMAGE: registry.gitlab.com/bennyrock20/food
+stages:
+  - build
+  - testing
+
+build-backend:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  script:
+    - |
+      if [[ "$CI_COMMIT_BRANCH" == "master" ]]; then
+         tag="latest"
+         branch_name="master"
+      else
+         tag="$CI_COMMIT_REF_SLUG"
+         branch_name=$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME
+      fi
+    - echo "Building $CI_REGISTRY_IMAGE:$tag"
+    - docker build -f Dockerfile -t $CI_REGISTRY_IMAGE:$tag .
+    - docker push $CI_REGISTRY_IMAGE:$tag
+  only:
+    refs:
+      - merge_requests
+      - master
+
+
+testing-backend:
+  image: docker:latest
+  stage: testing
+  services:
+    - docker:dind
+    - postgis/postgis
+    - redis:latest
+  variables:
+    POSTGRES_DB: food
+    POSTGRES_USER: food
+    POSTGRES_PASSWORD: food
+    POSTGRES_HOST_AUTH_METHOD: trust
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  script:
+    - |
+      if [[ "$CI_COMMIT_BRANCH" == "master" ]]; then
+         tag="latest"
+      else
+         tag="$CI_COMMIT_REF_SLUG"
+      fi
+    # Let's get the IP for postgres service
+    # We need that in order to add as a host available in our container
+    - POSTGRES_IP=$(cat /etc/hosts | awk '{if ($2 == "postgis__postgis") print $1;}')
+    - REDIS_IP=$(cat /etc/hosts | awk '{if ($2 == "redis") print $1;}')
+    # Just checking that the IP is reachable from outside the container
+    - ping -w 2 $POSTGRES_IP
+    - docker run --rm --net=host --env-file=.env.dev -e DB_HOST=$POSTGRES_IP -e BROKER_IP=$REDIS_IP $CI_REGISTRY_IMAGE:$tag ./manage.py wait_for_db
+    - docker run --rm --net=host --env-file=.env.dev -e DB_HOST=$POSTGRES_IP -e BROKER_IP=$REDIS_IP $CI_REGISTRY_IMAGE:$tag  pipenv run pytest --no-migrations -x -n auto
+  only:
+    refs:
+      - merge_requests
+      - master
+
